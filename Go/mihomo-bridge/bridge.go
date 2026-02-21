@@ -19,24 +19,29 @@ import (
 	"github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/hub/executor"
 	"github.com/metacubex/mihomo/log"
-	"github.com/metacubex/mihomo/tunnel"
+	"github.com/metacubex/mihomo/tunnel/statistic"
+
+	// Required by gomobile's gobind tool at build time.
+	_ "golang.org/x/mobile/bind"
 )
 
 var (
-	mu      sync.Mutex
-	running bool
+	mu          sync.Mutex
+	running     bool
 	tunFdGlobal int32 = -1
 )
 
 func init() {
 	// Aggressive GC to stay within iOS Network Extension's ~15MB memory limit.
 	// Go runtime itself takes ~5MB, leaving ~10MB for the app.
-	runtime.SetGCPercent(10)
+	debug.SetGCPercent(10)
 }
 
 // SetHomeDir sets the Mihomo home directory for config and data files.
+// Also updates the config file path to the absolute path within that directory.
 func SetHomeDir(path string) {
 	constant.SetHomeDir(path)
+	constant.SetConfig(filepath.Join(path, "config.yaml"))
 }
 
 // SetConfig writes the proxy configuration YAML to the home directory.
@@ -75,21 +80,21 @@ func StartProxy() error {
 		return fmt.Errorf("config.yaml not found in %s", homeDir)
 	}
 
-	// Disable process finding on iOS (not supported)
-	process.EnableFindProcess = false
-
 	cfg, err := executor.Parse()
 	if err != nil {
 		return fmt.Errorf("failed to parse config: %w", err)
 	}
 
+	// Disable process finding on iOS (not supported)
+	cfg.General.FindProcessMode = process.FindProcessMode(process.FindProcessOff)
+
 	// Inject TUN file descriptor from iOS if available.
 	// Mihomo's sing-tun uses this fd instead of creating its own TUN device.
 	if tunFdGlobal >= 0 {
-		cfg.Tun.Enable = true
-		cfg.Tun.FileDescriptor = int(tunFdGlobal)
-		cfg.Tun.AutoRoute = false
-		cfg.Tun.AutoDetectInterface = false
+		cfg.General.Tun.Enable = true
+		cfg.General.Tun.FileDescriptor = int(tunFdGlobal)
+		cfg.General.Tun.AutoRoute = false
+		cfg.General.Tun.AutoDetectInterface = false
 	}
 
 	executor.ApplyConfig(cfg, true)
@@ -120,23 +125,24 @@ func StartWithExternalController(addr, secret string) error {
 		return fmt.Errorf("config.yaml not found in %s", homeDir)
 	}
 
-	process.EnableFindProcess = false
-
 	cfg, err := executor.Parse()
 	if err != nil {
 		return fmt.Errorf("failed to parse config: %w", err)
 	}
 
+	// Disable process finding on iOS (not supported)
+	cfg.General.FindProcessMode = process.FindProcessMode(process.FindProcessOff)
+
 	// Override external controller settings
-	cfg.General.ExternalController = addr
-	cfg.General.Secret = secret
+	cfg.Controller.ExternalController = addr
+	cfg.Controller.Secret = secret
 
 	// Inject TUN fd
 	if tunFdGlobal >= 0 {
-		cfg.Tun.Enable = true
-		cfg.Tun.FileDescriptor = int(tunFdGlobal)
-		cfg.Tun.AutoRoute = false
-		cfg.Tun.AutoDetectInterface = false
+		cfg.General.Tun.Enable = true
+		cfg.General.Tun.FileDescriptor = int(tunFdGlobal)
+		cfg.General.Tun.AutoRoute = false
+		cfg.General.Tun.AutoDetectInterface = false
 	}
 
 	executor.ApplyConfig(cfg, true)
@@ -199,10 +205,16 @@ func ValidateConfig(yamlContent string) error {
 	return err
 }
 
-// GetTrafficStats returns the current upload and download traffic in bytes.
-func GetTrafficStats() (up, down int64) {
-	snapshot := tunnel.DefaultManager.Snapshot()
-	return snapshot.UploadTotal, snapshot.DownloadTotal
+// GetUploadTraffic returns the current upload traffic in bytes.
+func GetUploadTraffic() int64 {
+	snapshot := statistic.DefaultManager.Snapshot()
+	return snapshot.UploadTotal
+}
+
+// GetDownloadTraffic returns the current download traffic in bytes.
+func GetDownloadTraffic() int64 {
+	snapshot := statistic.DefaultManager.Snapshot()
+	return snapshot.DownloadTotal
 }
 
 // ForceGC triggers garbage collection and returns memory to the OS.

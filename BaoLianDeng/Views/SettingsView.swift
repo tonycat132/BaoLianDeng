@@ -28,6 +28,12 @@ struct SettingsView: View {
                     }
                 }
 
+                Section("Debug") {
+                    NavigationLink("Tunnel Log") {
+                        TunnelLogView()
+                    }
+                }
+
                 Section("About") {
                     NavigationLink("About BaoLianDeng") {
                         AboutView()

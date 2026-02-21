@@ -9,51 +9,92 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var proxyStarted = false
     private var gcTimer: DispatchSourceTimer?
 
+    // Write log entries to shared container so the main app can read them
+    private func log(_ message: String) {
+        let line = "[\(Date())] \(message)\n"
+        NSLog("[BaoLianDeng] \(message)")
+        guard let dir = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: AppConstants.appGroupIdentifier
+        ) else { return }
+        let logURL = dir.appendingPathComponent("tunnel.log")
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: logURL.path),
+               let handle = try? FileHandle(forWritingTo: logURL) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                try? handle.close()
+            } else {
+                try? data.write(to: logURL)
+            }
+        }
+    }
+
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
         setupLogging()
+        // Clear old log on each tunnel start
+        if let dir = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AppConstants.appGroupIdentifier) {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent("tunnel.log"))
+        }
+        log("startTunnel called")
 
         guard let configDir = configDirectory else {
+            log("ERROR: config directory unavailable")
             completionHandler(PacketTunnelError.configDirectoryUnavailable)
             return
         }
+        log("configDir: \(configDir)")
 
         // Point Mihomo to the shared config directory
         BridgeSetHomeDir(configDir)
 
         // Ensure config exists
-        guard FileManager.default.fileExists(atPath: configDir + "/config.yaml") else {
+        let configPath = configDir + "/config.yaml"
+        guard FileManager.default.fileExists(atPath: configPath) else {
+            log("ERROR: config.yaml not found at \(configPath)")
             completionHandler(PacketTunnelError.configNotFound)
             return
         }
 
-        // Configure TUN network settings
+        // Log first 300 chars of config for debugging
+        if let cfg = try? String(contentsOfFile: configPath, encoding: .utf8) {
+            log("config.yaml preview: \(String(cfg.prefix(300)))")
+        }
+
         let settings = createTunnelSettings()
+        log("Setting tunnel network settings")
 
         setTunnelNetworkSettings(settings) { [weak self] error in
             if let error = error {
+                self?.log("ERROR: setTunnelNetworkSettings failed: \(error)")
                 completionHandler(error)
                 return
             }
 
-            // Pass the TUN file descriptor to Go core
-            if let fd = self?.tunnelFileDescriptor {
-                var fdErr: NSError?
-                BridgeSetTUNFd(Int32(fd), &fdErr)
-                if let fdErr = fdErr {
-                    NSLog("[BaoLianDeng] Failed to set TUN fd: \(fdErr)")
-                    completionHandler(fdErr)
-                    return
-                }
+            guard let fd = self?.tunnelFileDescriptor else {
+                self?.log("ERROR: could not find utun file descriptor")
+                completionHandler(PacketTunnelError.configDirectoryUnavailable)
+                return
+            }
+            self?.log("Found TUN fd: \(fd)")
+
+            var fdErr: NSError?
+            BridgeSetTUNFd(Int32(fd), &fdErr)
+            if let fdErr = fdErr {
+                self?.log("ERROR: Failed to set TUN fd: \(fdErr)")
+                completionHandler(fdErr)
+                return
             }
 
-            // Start the Mihomo proxy engine
+            self?.log("Starting Mihomo proxy engine")
             var startError: NSError?
             BridgeStartProxy(&startError)
             if let startError = startError {
+                self?.log("ERROR: BridgeStartProxy failed: \(startError)")
                 completionHandler(startError)
                 return
             }
 
+            self?.log("Proxy started successfully")
             self?.proxyStarted = true
             self?.startMemoryManagement()
             completionHandler(nil)
@@ -84,9 +125,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             completionHandler?(responseData(["status": "ok"]))
 
         case "get_traffic":
-            var up: Int64 = 0
-            var down: Int64 = 0
-            BridgeGetTrafficStats(&up, &down)
+            let up = BridgeGetUploadTraffic()
+            let down = BridgeGetDownloadTraffic()
             completionHandler?(responseData([
                 "upload": up,
                 "download": down
@@ -195,7 +235,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         var err: NSError?
         BridgeStartProxy(&err)
         if let err = err {
-            NSLog("[BaoLianDeng] Failed to restart with new mode: \(err)")
+            log("ERROR: Failed to restart with new mode: \(err)")
         }
     }
 

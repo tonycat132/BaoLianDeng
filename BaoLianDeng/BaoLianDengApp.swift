@@ -8,6 +8,10 @@ import SwiftUI
 struct BaoLianDengApp: App {
     @StateObject private var vpnManager = VPNManager.shared
 
+    init() {
+        ConfigManager.shared.sanitizeConfig()
+    }
+
     var body: some Scene {
         WindowGroup {
             TabView {

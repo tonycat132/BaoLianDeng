@@ -50,9 +50,30 @@ open BaoLianDeng.xcodeproj
 
 ### 3. Configure signing
 
-- Select your development team for both the **BaoLianDeng** and **PacketTunnel** targets
-- Ensure the App Group (`group.io.github.baoliandeng`) capability is enabled for both targets
-- Ensure the Network Extension (`packet-tunnel-provider`) capability is enabled
+The project has no Team ID committed. You must set your own before building on a device.
+
+**In Xcode (recommended):**
+1. Open `BaoLianDeng.xcodeproj`
+2. Select the **BaoLianDeng** target → Signing & Capabilities → set your Team
+3. Repeat for the **PacketTunnel** target
+4. Xcode will write your Team ID into `project.pbxproj` — do **not** commit that change
+
+**From the command line:**
+```bash
+xcodebuild build \
+  -scheme BaoLianDeng \
+  -destination 'id=<YOUR_DEVICE_UDID>' \
+  -allowProvisioningUpdates \
+  DEVELOPMENT_TEAM=<YOUR_TEAM_ID>
+```
+
+> **Finding your Team ID:** Apple Developer portal → Membership → Team ID (10-character string, e.g. `AB12CD34EF`).
+
+Both targets require these capabilities (already configured in entitlements):
+- **App Groups** — `group.io.github.baoliandeng`
+- **Network Extensions** — Packet Tunnel Provider
+
+If you distribute under a different bundle ID, also update `appGroupIdentifier` and `tunnelBundleIdentifier` in `Shared/Constants.swift` and the matching entitlement files.
 
 ### 4. Build and run
 

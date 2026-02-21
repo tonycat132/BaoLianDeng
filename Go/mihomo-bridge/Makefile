@@ -21,7 +21,7 @@ ios: setup
 	$(GOMOBILE) bind \
 		-target=ios,iossimulator \
 		-o $(OUTPUT_DIR)/$(FRAMEWORK_NAME).xcframework \
-		-iosversion=15.0 \
+		-iosversion=17.0 \
 		-tags=ios \
 		-ldflags="-s -w" \
 		.
@@ -31,7 +31,7 @@ ios-arm64: setup
 	$(GOMOBILE) bind \
 		-target=ios/arm64 \
 		-o $(OUTPUT_DIR)/$(FRAMEWORK_NAME).xcframework \
-		-iosversion=15.0 \
+		-iosversion=17.0 \
 		-tags=ios \
 		-ldflags="-s -w" \
 		.

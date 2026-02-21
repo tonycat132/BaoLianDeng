@@ -10,7 +10,11 @@ struct HomeView: View {
     @State private var selectedMode: ProxyMode = .rule
     @State private var subscriptions: [Subscription] = []
     @State private var selectedNode: String?
+    @State private var selectedSubscriptionID: UUID?
     @State private var showAddSubscription = false
+    @State private var editingSubscription: Subscription?
+    @State private var isReloading = false
+    @State private var reloadResult: ReloadResult?
 
     var body: some View {
         NavigationStack {
@@ -26,9 +30,36 @@ struct HomeView: View {
                         Image(systemName: "plus")
                     }
                 }
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        Task { await reloadAllSubscriptions() }
+                    } label: {
+                        if isReloading {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                    }
+                    .disabled(subscriptions.isEmpty || isReloading)
+                }
+            }
+            .alert(item: $reloadResult) { result in
+                Alert(
+                    title: Text("Reload Complete"),
+                    message: Text(result.message),
+                    dismissButton: .default(Text("OK"))
+                )
             }
             .sheet(isPresented: $showAddSubscription) {
                 AddSubscriptionView(subscriptions: $subscriptions)
+            }
+            .sheet(item: $editingSubscription) { sub in
+                EditSubscriptionView(subscription: sub) { updated in
+                    if let i = subscriptions.firstIndex(where: { $0.id == updated.id }) {
+                        subscriptions[i] = updated
+                        saveSubscriptions()
+                    }
+                }
             }
             .onAppear { loadSubscriptions() }
         }
@@ -59,6 +90,12 @@ struct HomeView: View {
                 .disabled(vpnManager.isProcessing)
             }
             .padding(.vertical, 4)
+
+            if let err = vpnManager.errorMessage {
+                Text(err)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
         }
     }
 
@@ -103,6 +140,45 @@ struct HomeView: View {
         } else {
             ForEach($subscriptions) { $sub in
                 Section {
+                    Button(action: { selectSubscription(sub) }) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(sub.name)
+                                    .font(.headline)
+                                    .foregroundStyle(.primary)
+                                Text("\(sub.nodes.count) nodes")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if selectedSubscriptionID == sub.id {
+                                Image(systemName: "checkmark")
+                                    .font(.body.weight(.semibold))
+                                    .foregroundStyle(.blue)
+                            }
+                            Button(action: { refreshSubscription(&sub) }) {
+                                Image(systemName: "arrow.clockwise")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button(role: .destructive) {
+                            if let i = subscriptions.firstIndex(where: { $0.id == sub.id }) {
+                                deleteSubscription(at: IndexSet(integer: i))
+                            }
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                        Button {
+                            editingSubscription = sub
+                        } label: {
+                            Label("Edit", systemImage: "pencil")
+                        }
+                        .tint(.orange)
+                    }
+
                     ForEach(sub.nodes) { node in
                         NodeRow(
                             node: node,
@@ -113,21 +189,8 @@ struct HomeView: View {
                             }
                         )
                     }
-                } header: {
-                    HStack {
-                        Text(sub.name)
-                        Spacer()
-                        Text("\(sub.nodes.count) nodes")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Button(action: { refreshSubscription(&sub) }) {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.caption)
-                        }
-                    }
                 }
             }
-            .onDelete(perform: deleteSubscription)
         }
     }
 
@@ -153,15 +216,37 @@ struct HomeView: View {
         }
     }
 
+    private func selectSubscription(_ sub: Subscription) {
+        selectedSubscriptionID = sub.id
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set(sub.id.uuidString, forKey: "selectedSubscriptionID")
+        // Auto-select first node if current node isn't from this subscription
+        let nodeNames = Set(sub.nodes.map(\.name))
+        if selectedNode == nil || !nodeNames.contains(selectedNode ?? "") {
+            if let first = sub.nodes.first {
+                selectedNode = first.name
+                saveSelectedNode(first.name)
+            }
+        }
+        // Apply the subscription YAML to config.yaml so the VPN uses it
+        if let raw = sub.rawContent {
+            try? ConfigManager.shared.applySubscriptionConfig(raw)
+        }
+    }
+
     private func loadSubscriptions() {
-        guard let data = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
-            .data(forKey: "subscriptions"),
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        guard let data = defaults?.data(forKey: "subscriptions"),
               let subs = try? JSONDecoder().decode([Subscription].self, from: data) else {
             return
         }
         subscriptions = subs
-        selectedNode = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
-            .string(forKey: "selectedNode")
+        selectedNode = defaults?.string(forKey: "selectedNode")
+        if let idString = defaults?.string(forKey: "selectedSubscriptionID"),
+           let id = UUID(uuidString: idString),
+           subs.contains(where: { $0.id == id }) {
+            selectedSubscriptionID = id
+        }
     }
 
     private func saveSubscriptions() {
@@ -176,14 +261,85 @@ struct HomeView: View {
     }
 
     private func deleteSubscription(at offsets: IndexSet) {
+        for i in offsets where subscriptions[i].id == selectedSubscriptionID {
+            selectedSubscriptionID = nil
+            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .removeObject(forKey: "selectedSubscriptionID")
+        }
         subscriptions.remove(atOffsets: offsets)
         saveSubscriptions()
     }
 
     private func refreshSubscription(_ sub: inout Subscription) {
-        // Trigger re-fetch of the subscription URL
+        let id = sub.id
+        let url = sub.url
         sub.isUpdating = true
+        Task {
+            do {
+                let result = try await fetchSubscription(from: url)
+                if let i = subscriptions.firstIndex(where: { $0.id == id }) {
+                    subscriptions[i].nodes = result.nodes
+                    subscriptions[i].rawContent = result.raw
+                    subscriptions[i].isUpdating = false
+                    // Re-apply config if this is the selected subscription
+                    if subscriptions[i].id == selectedSubscriptionID {
+                        try? ConfigManager.shared.applySubscriptionConfig(result.raw)
+                    }
+                }
+                saveSubscriptions()
+            } catch {
+                if let i = subscriptions.firstIndex(where: { $0.id == id }) {
+                    subscriptions[i].isUpdating = false
+                }
+            }
+        }
+    }
+
+    private func reloadAllSubscriptions() async {
+        guard !subscriptions.isEmpty else { return }
+        isReloading = true
+        var succeeded: [String] = []
+        var failed: [(String, String)] = []
+
+        await withTaskGroup(of: (Int, Result<(nodes: [ProxyNode], raw: String), Error>).self) { group in
+            for (i, sub) in subscriptions.enumerated() {
+                group.addTask {
+                    do {
+                        let result = try await fetchSubscription(from: sub.url)
+                        return (i, .success(result))
+                    } catch {
+                        return (i, .failure(error))
+                    }
+                }
+            }
+            for await (i, result) in group {
+                switch result {
+                case .success(let fetched):
+                    subscriptions[i].nodes = fetched.nodes
+                    subscriptions[i].rawContent = fetched.raw
+                    succeeded.append(subscriptions[i].name)
+                case .failure(let error):
+                    failed.append((subscriptions[i].name, error.localizedDescription))
+                }
+            }
+        }
+
         saveSubscriptions()
+        isReloading = false
+        reloadResult = ReloadResult(succeeded: succeeded, failed: failed)
+    }
+
+    private func fetchSubscription(from urlString: String) async throws -> (nodes: [ProxyNode], raw: String) {
+        guard let url = URL(string: urlString) else {
+            throw URLError(.badURL)
+        }
+        var request = URLRequest(url: url)
+        request.setValue("ClashforWindows/0.20.39", forHTTPHeaderField: "User-Agent")
+        let (data, _) = try await URLSession.shared.data(for: request)
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw URLError(.cannotDecodeContentData)
+        }
+        return (SubscriptionParser.parse(text), text)
     }
 }
 
@@ -243,10 +399,11 @@ struct Subscription: Identifiable, Codable {
     var name: String
     var url: String
     var nodes: [ProxyNode]
+    var rawContent: String?
     var isUpdating: Bool = false
 
     enum CodingKeys: String, CodingKey {
-        case id, name, url, nodes
+        case id, name, url, nodes, rawContent
     }
 }
 
@@ -331,6 +488,139 @@ struct AddSubscriptionView: View {
         if let data = try? JSONEncoder().encode(subscriptions) {
             UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
                 .set(data, forKey: "subscriptions")
+        }
+    }
+}
+
+// MARK: - Reload Result
+
+struct ReloadResult: Identifiable {
+    let id = UUID()
+    let succeeded: [String]
+    let failed: [(String, String)]
+
+    var message: String {
+        var parts: [String] = []
+        if !succeeded.isEmpty {
+            parts.append("✓ \(succeeded.joined(separator: ", "))")
+        }
+        if !failed.isEmpty {
+            let names = failed.map { "\($0.0): \($0.1)" }.joined(separator: "\n")
+            parts.append("✗ \(names)")
+        }
+        return parts.joined(separator: "\n")
+    }
+}
+
+// MARK: - Subscription Parser
+
+enum SubscriptionParser {
+    static func parse(_ text: String) -> [ProxyNode] {
+        let lines = text.components(separatedBy: "\n")
+        var nodes: [ProxyNode] = []
+        var inProxies = false
+        var current: [String: String] = [:]
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if line.hasPrefix("proxies:") {
+                inProxies = true
+                continue
+            }
+            // Top-level key ends the proxies section
+            if inProxies, !line.hasPrefix(" "), !line.isEmpty, line.contains(":") {
+                if let node = makeNode(from: current) { nodes.append(node) }
+                current = [:]
+                inProxies = false
+                continue
+            }
+            guard inProxies else { continue }
+
+            if trimmed == "-" {
+                // Dash alone on its line — start of a new block item
+                if let node = makeNode(from: current) { nodes.append(node) }
+                current = [:]
+            } else if trimmed.hasPrefix("- ") {
+                // Inline: "- name: value"
+                if let node = makeNode(from: current) { nodes.append(node) }
+                current = [:]
+                parseKV(String(trimmed.dropFirst(2)), into: &current)
+            } else {
+                parseKV(trimmed, into: &current)
+            }
+        }
+        if let node = makeNode(from: current) { nodes.append(node) }
+        return nodes
+    }
+
+    private static func parseKV(_ s: String, into dict: inout [String: String]) {
+        guard let idx = s.firstIndex(of: ":") else { return }
+        let key = String(s[..<idx]).trimmingCharacters(in: .whitespaces)
+        var value = String(s[s.index(after: idx)...]).trimmingCharacters(in: .whitespaces)
+        if value.count >= 2,
+           (value.hasPrefix("\"") && value.hasSuffix("\"")) ||
+           (value.hasPrefix("'") && value.hasSuffix("'")) {
+            value = String(value.dropFirst().dropLast())
+        }
+        if !key.isEmpty { dict[key] = value }
+    }
+
+    private static func makeNode(from dict: [String: String]) -> ProxyNode? {
+        guard let name = dict["name"],
+              let type_ = dict["type"],
+              let server = dict["server"],
+              let portStr = dict["port"],
+              let port = Int(portStr) else { return nil }
+        return ProxyNode(name: name, type: type_, server: server, port: port)
+    }
+}
+
+// MARK: - Edit Subscription Sheet
+
+struct EditSubscriptionView: View {
+    @Environment(\.dismiss) private var dismiss
+    let subscription: Subscription
+    let onSave: (Subscription) -> Void
+
+    @State private var name: String
+    @State private var url: String
+
+    init(subscription: Subscription, onSave: @escaping (Subscription) -> Void) {
+        self.subscription = subscription
+        self.onSave = onSave
+        _name = State(initialValue: subscription.name)
+        _url = State(initialValue: subscription.url)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Subscription Info") {
+                    TextField("Name", text: $name)
+                    TextField("URL", text: $url)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                }
+            }
+            .navigationTitle("Edit Subscription")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        var updated = subscription
+                        updated.name = name
+                        updated.url = url
+                        onSave(updated)
+                        dismiss()
+                    }
+                    .disabled(name.isEmpty || url.isEmpty)
+                }
+            }
         }
     }
 }
