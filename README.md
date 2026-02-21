@@ -1,61 +1,123 @@
 # BaoLianDeng
 
-An android client for Lantern, based on SmartProxy.
+iOS global proxy app powered by [Mihomo](https://github.com/MetaCubeX/mihomo) (Clash Meta) core.
 
-# Build 
+## Architecture
 
 ```
-cp local.properties.example local.properties
-edit local.properties
-./gradlew build
+┌─────────────────────────────────────────────┐
+│                iOS App (Swift)              │
+│  ┌─────────────┐  ┌─────────────────────┐  │
+│  │  SwiftUI    │  │  VPNManager         │  │
+│  │  MainView   │──│  (NETunnelProvider  │  │
+│  │  ConfigEdit │  │   Manager)          │  │
+│  └─────────────┘  └────────┬────────────┘  │
+├────────────────────────────┼────────────────┤
+│         Network Extension (PacketTunnel)    │
+│  ┌─────────────────────────┴──────────────┐ │
+│  │    NEPacketTunnelProvider              │ │
+│  │    ┌───────────────────────────────┐   │ │
+│  │    │  MihomoCore.xcframework (Go)  │   │ │
+│  │    │  - Proxy Engine               │   │ │
+│  │    │  - DNS (fake-ip)              │   │ │
+│  │    │  - Rules / Routing            │   │ │
+│  │    └───────────────────────────────┘   │ │
+│  └────────────────────────────────────────┘ │
+└─────────────────────────────────────────────┘
 ```
 
-# License
+## Prerequisites
 
-Copyright (C) 2015 Max Lv max.c.lv@gmail.com
+- macOS with Xcode 15+
+- Go 1.22+
+- gomobile (`go install golang.org/x/mobile/cmd/gomobile@latest`)
 
-This program is free software: you can redistribute it and/or modify it under
-the terms of the GNU General Public License as published by the Free Software
-Foundation, either version 3 of the License, or (at your option) any later
-version.
+## Build
 
-This program is distributed in the hope that it will be useful, but WITHOUT ANY
-WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
-PARTICULAR PURPOSE. See the GNU General Public License for more details.
+### 1. Build the Go framework
 
-You should have received a copy of the GNU General Public License along with
-this program. If not, see http://www.gnu.org/licenses/.
+```bash
+make framework
+```
 
-# Open source licenses
+This compiles the Mihomo Go core into `Framework/MihomoCore.xcframework` using gomobile.
 
-*SmartProxy*
+### 2. Open in Xcode
 
-Copyright (C) 2014 hedaode
+```bash
+open BaoLianDeng.xcodeproj
+```
 
-This program is free software: you can redistribute it and/or modify it under
-the terms of the GNU General Public License as published by the Free Software
-Foundation, either version 3 of the License, or (at your option) any later
-version.
+### 3. Configure signing
 
-This program is distributed in the hope that it will be useful, but WITHOUT ANY
-WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
-PARTICULAR PURPOSE. See the GNU General Public License for more details.
+- Select your development team for both the **BaoLianDeng** and **PacketTunnel** targets
+- Ensure the App Group (`group.io.github.baoliandeng`) capability is enabled for both targets
+- Ensure the Network Extension (`packet-tunnel-provider`) capability is enabled
 
-You should have received a copy of the GNU General Public License along with
-this program. If not, see http://www.gnu.org/licenses/.
+### 4. Build and run
 
-*Lantern*
+Select your device and press `Cmd+R`.
 
-Copyright 2010 Brave New Software Project, Inc.
+## Configuration
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+The app uses Mihomo YAML configuration format. Edit the config through the in-app editor or place a `config.yaml` in the app's shared container.
 
-   http://www.apache.org/licenses/LICENSE-2.0
+Example minimal config:
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+```yaml
+mixed-port: 7890
+mode: rule
+log-level: info
+
+dns:
+  enable: true
+  listen: 198.18.0.2:53
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  nameserver:
+    - https://dns.alidns.com/dns-query
+
+proxies:
+  - name: "my-proxy"
+    type: ss
+    server: your-server.com
+    port: 8388
+    cipher: aes-256-gcm
+    password: "your-password"
+
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - my-proxy
+
+rules:
+  - GEOIP,CN,DIRECT
+  - MATCH,PROXY
+```
+
+## Project Structure
+
+```
+BaoLianDeng/
+├── BaoLianDeng/              # Main iOS app target
+│   ├── BaoLianDengApp.swift  # App entry point
+│   ├── Views/                # SwiftUI views
+│   ├── Assets.xcassets/      # App assets
+│   └── Info.plist
+├── PacketTunnel/             # Network Extension target
+│   └── PacketTunnelProvider.swift
+├── Shared/                   # Code shared between targets
+│   ├── Constants.swift
+│   ├── ConfigManager.swift
+│   └── VPNManager.swift
+├── Go/mihomo-bridge/         # Go bridge to Mihomo core
+│   ├── bridge.go             # Main bridge API
+│   ├── tun_ios.go            # iOS TUN device integration
+│   └── Makefile              # gomobile build script
+└── Framework/                # Built xcframework output
+```
+
+## License
+
+GPL-3.0

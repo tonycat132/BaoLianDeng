@@ -1,0 +1,103 @@
+# Copyright (c) 2026 Max Lv <max.c.lv@gmail.com>
+#
+# Licensed under the MIT License. See LICENSE file in the project root for details.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-framework:
+    name: Build Go Framework
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: Go/mihomo-bridge/go.sum
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-gomod-${{ hashFiles('Go/mihomo-bridge/go.sum') }}
+          restore-keys: ${{ runner.os }}-gomod-
+
+      - name: Cache gomobile tools
+        uses: actions/cache@v4
+        with:
+          path: ~/go/bin
+          key: ${{ runner.os }}-gobin-gomobile
+
+      - name: Build MihomoCore.xcframework
+        run: make framework
+
+      - name: Upload framework artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MihomoCore.xcframework
+          path: Framework/MihomoCore.xcframework
+          retention-days: 7
+
+  build-app:
+    name: Build iOS App
+    runs-on: macos-15
+    needs: build-framework
+    strategy:
+      matrix:
+        configuration: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download framework artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: MihomoCore.xcframework
+          path: Framework/MihomoCore.xcframework
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
+
+      - name: Show build settings
+        run: |
+          xcodebuild -project BaoLianDeng.xcodeproj \
+            -scheme BaoLianDeng \
+            -showBuildSettings \
+            -configuration ${{ matrix.configuration }} | head -50
+
+      - name: Build
+        run: |
+          xcodebuild build \
+            -project BaoLianDeng.xcodeproj \
+            -scheme BaoLianDeng \
+            -configuration ${{ matrix.configuration }} \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO | xcpretty && exit ${PIPESTATUS[0]}
+
+  swiftlint:
+    name: SwiftLint
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run SwiftLint
+        run: |
+          if command -v swiftlint &> /dev/null; then
+            swiftlint lint --strict --reporter github-actions-logging
+          else
+            echo "SwiftLint not installed, skipping"
+          fi
+        continue-on-error: true
