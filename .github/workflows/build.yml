@@ -44,79 +44,79 @@ jobs:
           path: Framework/MihomoCore.xcframework
           retention-days: 7
 
-build-app:
-  name: Build iOS App
-  runs-on: macos-15
-  needs: build-framework
-  strategy:
-    matrix:
-      configuration: [Debug, Release]
-
-  steps:
-    - uses: actions/checkout@v4
-
-    - name: Download framework artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: MihomoCore.xcframework
-        path: Framework/MihomoCore.xcframework
-
-    - name: Create Local.xcconfig
-      run: touch Local.xcconfig
-
-    # ────────────────────────────────────────────────
-    #          改成 archive + export → 生成 .ipa
-    # ────────────────────────────────────────────────
-    - name: Archive
-      run: |
-        xcodebuild archive \
-          -project BaoLianDeng.xcodeproj \
-          -scheme BaoLianDeng \
-          -configuration ${{ matrix.configuration }} \
-          -destination 'generic/platform=iOS' \          # 真机 archive（推荐）
-          -archivePath "./build/BaoLianDeng-${{ matrix.configuration }}.xcarchive" \
-          CODE_SIGN_IDENTITY="" \
-          CODE_SIGNING_REQUIRED=NO \
-          CODE_SIGNING_ALLOWED=NO | xcpretty && exit ${PIPESTATUS[0]}
-
-    - name: Export IPA
-      run: |
-        xcodebuild -exportArchive \
-          -archivePath "./build/BaoLianDeng-${{ matrix.configuration }}.xcarchive" \
-          -exportOptionsPlist exportOptions.plist \
-          -exportPath "./build" | xcpretty && exit ${PIPESTATUS[0]}
-
-    # 必须先创建一个最简单的 exportOptions.plist（因为你不签名）
-    - name: Create exportOptions.plist (unsigned)
-      if: always()  # 即使前面失败也创建，方便 debug
-      run: |
-        cat << EOF > exportOptions.plist
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-          <key>method</key>
-          <string>development</string>   <!-- 或 app-store / ad-hoc / enterprise -->
-          <key>signingStyle</key>
-          <string>manual</string>
-          <key>signingCertificate</key>
-          <string></string>
-          <key>provisioningProfiles</key>
-          <dict/>
-          <key>compileBitcode</key>
-          <false/>
-          <key>uploadBitcode</key>
-          <false/>
-          <key>uploadSymbols</key>
-          <false/>
-        </dict>
-        </plist>
-        EOF
-
-    - name: Upload IPA artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: BaoLianDeng-${{ matrix.configuration }}.ipa
+  build-app:
+    name: Build iOS App
+    runs-on: macos-15
+    needs: build-framework
+    strategy:
+      matrix:
+        configuration: [Debug, Release]
+  
+    steps:
+      - uses: actions/checkout@v4
+  
+      - name: Download framework artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: MihomoCore.xcframework
+          path: Framework/MihomoCore.xcframework
+  
+      - name: Create Local.xcconfig
+        run: touch Local.xcconfig
+  
+      # ────────────────────────────────────────────────
+      #          改成 archive + export → 生成 .ipa
+      # ────────────────────────────────────────────────
+      - name: Archive
+        run: |
+          xcodebuild archive \
+            -project BaoLianDeng.xcodeproj \
+            -scheme BaoLianDeng \
+            -configuration ${{ matrix.configuration }} \
+            -destination 'generic/platform=iOS' \          # 真机 archive（推荐）
+            -archivePath "./build/BaoLianDeng-${{ matrix.configuration }}.xcarchive" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO | xcpretty && exit ${PIPESTATUS[0]}
+  
+      - name: Export IPA
+        run: |
+          xcodebuild -exportArchive \
+            -archivePath "./build/BaoLianDeng-${{ matrix.configuration }}.xcarchive" \
+            -exportOptionsPlist exportOptions.plist \
+            -exportPath "./build" | xcpretty && exit ${PIPESTATUS[0]}
+  
+      # 必须先创建一个最简单的 exportOptions.plist（因为你不签名）
+      - name: Create exportOptions.plist (unsigned)
+        if: always()  # 即使前面失败也创建，方便 debug
+        run: |
+          cat << EOF > exportOptions.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>development</string>   <!-- 或 app-store / ad-hoc / enterprise -->
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>signingCertificate</key>
+            <string></string>
+            <key>provisioningProfiles</key>
+            <dict/>
+            <key>compileBitcode</key>
+            <false/>
+            <key>uploadBitcode</key>
+            <false/>
+            <key>uploadSymbols</key>
+            <false/>
+          </dict>
+          </plist>
+          EOF
+  
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BaoLianDeng-${{ matrix.configuration }}.ipa
         path: ./build/BaoLianDeng.ipa
         if-no-files-found: warn          # 如果没生成 ipa 也继续（方便 debug）
         retention-days: 7
