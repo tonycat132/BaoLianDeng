@@ -10,54 +10,63 @@ enum ConfigSource: Hashable {
 }
 
 struct ConfigEditorView: View {
-    @State private var configText: String = ""
-    @State private var subscriptionText: String = ""
-    @State private var validationErrors: [YAMLError] = []
+    @State private var configText = ""
+    @State private var proxyGroups: [EditableProxyGroup] = []
+    @State private var rules: [EditableRule] = []
+    @State private var subscriptionText = ""
+    @State private var subscriptionProxyGroups: [EditableProxyGroup] = []
+    @State private var subscriptionRules: [EditableRule] = []
+    @State private var source: ConfigSource = .local
+    @State private var selectedSubscription: Subscription?
     @State private var showError = false
     @State private var errorMessage = ""
     @State private var isSaving = false
     @State private var showSaved = false
-    @State private var showErrors = false
-    @State private var source: ConfigSource = .local
-    @State private var selectedSubscription: Subscription?
+    @State private var showAddGroup = false
+    @State private var showAddRule = false
 
     var isSubscriptionSource: Bool {
         if case .subscription = source { return true }
         return false
     }
 
-    private var activeText: Binding<String> {
-        isSubscriptionSource ? $subscriptionText : $configText
-    }
-
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
+            List {
                 if selectedSubscription != nil {
-                    sourcePicker
+                    Section {
+                        Picker("Source", selection: $source) {
+                            Text("Local Config").tag(ConfigSource.local)
+                            if let sub = selectedSubscription {
+                                Text(sub.name).tag(ConfigSource.subscription(sub.id))
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                    }
                 }
-                configHeader
-                YAMLEditor(text: activeText, validationErrors: $validationErrors)
-                if !validationErrors.isEmpty {
-                    errorBar
-                }
+
+                proxyGroupsSection
+                rulesSection
             }
             .navigationTitle("Config")
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Save") {
-                        isSubscriptionSource ? saveSubscription() : saveConfig()
+                ToolbarItem(placement: .topBarLeading) {
+                    if !isSubscriptionSource {
+                        EditButton()
                     }
-                    .disabled(isSaving)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    if !isSubscriptionSource {
+                        Button("Save") { saveConfig() }
+                            .disabled(isSaving)
+                    }
                 }
                 ToolbarItem(placement: .bottomBar) {
-                    HStack {
-                        if isSubscriptionSource {
-                            Button("Reset to Fetched", role: .destructive) { resetSubscription() }
-                        } else {
+                    if !isSubscriptionSource {
+                        HStack {
                             Button("Reset Default", role: .destructive) { resetConfig() }
+                            Spacer()
                         }
-                        Spacer()
                     }
                 }
             }
@@ -66,8 +75,15 @@ struct ConfigEditorView: View {
             } message: {
                 Text(errorMessage)
             }
-            .sheet(isPresented: $showErrors) {
-                errorListSheet
+            .sheet(isPresented: $showAddGroup) {
+                AddProxyGroupSheet { group in
+                    proxyGroups.append(group)
+                }
+            }
+            .sheet(isPresented: $showAddRule) {
+                AddRuleSheet(groupNames: proxyGroups.map(\.name)) { rule in
+                    rules.append(rule)
+                }
             }
             .overlay {
                 if showSaved {
@@ -76,91 +92,139 @@ struct ConfigEditorView: View {
             }
             .onAppear {
                 loadConfig()
-                validationErrors = YAMLValidator.validate(configText)
                 loadSelectedSubscription()
             }
-            .onChange(of: source) { _, _ in
-                validationErrors = YAMLValidator.validate(isSubscriptionSource ? subscriptionText : configText)
-            }
         }
     }
 
-    private var sourcePicker: some View {
-        Picker("Source", selection: $source) {
-            Text("Local Config").tag(ConfigSource.local)
-            if let sub = selectedSubscription {
-                Text(sub.name).tag(ConfigSource.subscription(sub.id))
-            }
-        }
-        .pickerStyle(.segmented)
-        .padding(.horizontal)
-        .padding(.vertical, 8)
-        .background(.ultraThinMaterial)
-    }
+    // MARK: - Proxy Groups Section
 
-    private var configHeader: some View {
-        HStack {
-            Image(systemName: isSubscriptionSource ? "cloud.fill" : "doc.text")
-            if isSubscriptionSource, let sub = selectedSubscription {
-                Text(sub.url)
-                    .font(.caption)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+    private var proxyGroupsSection: some View {
+        Section {
+            if isSubscriptionSource {
+                ForEach(subscriptionProxyGroups) { group in
+                    NavigationLink {
+                        ProxyGroupDetailView(group: .constant(group), isEditable: false)
+                    } label: {
+                        proxyGroupRow(group)
+                    }
+                }
             } else {
-                Text("config.yaml")
-                    .font(.caption)
+                ForEach($proxyGroups) { $group in
+                    NavigationLink {
+                        ProxyGroupDetailView(group: $group, isEditable: true)
+                    } label: {
+                        proxyGroupRow(group)
+                    }
+                }
+                .onDelete { offsets in
+                    proxyGroups.remove(atOffsets: offsets)
+                }
             }
-            Spacer()
-            Text("\(isSubscriptionSource ? subscriptionText.count : configText.count) chars")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+        } header: {
+            HStack {
+                Text("Proxy Groups")
+                Spacer()
+                if !isSubscriptionSource {
+                    Button { showAddGroup = true } label: {
+                        Image(systemName: "plus.circle")
+                            .font(.body)
+                    }
+                }
+            }
         }
-        .padding(.horizontal)
-        .padding(.vertical, 8)
-        .background(.ultraThinMaterial)
     }
 
-    private var errorBar: some View {
-        Button(action: { showErrors = true }) {
-            HStack(spacing: 6) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.yellow)
-                Text("\(validationErrors.count) issue\(validationErrors.count == 1 ? "" : "s")")
-                    .font(.caption.weight(.medium))
-                Spacer()
-                Image(systemName: "chevron.up")
+    private func proxyGroupRow(_ group: EditableProxyGroup) -> some View {
+        HStack {
+            Image(systemName: groupTypeIcon(group.type))
+                .foregroundStyle(groupTypeColor(group.type))
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(group.name)
+                    .font(.body)
+                Text(group.type)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
-            .padding(.horizontal)
-            .padding(.vertical, 8)
-            .background(.ultraThinMaterial)
+            Spacer()
+            Text("\(group.proxies.count)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
+                .background(.quaternary)
+                .clipShape(Capsule())
         }
-        .buttonStyle(.plain)
     }
 
-    private var errorListSheet: some View {
-        NavigationStack {
-            List(validationErrors) { error in
-                HStack(alignment: .top, spacing: 10) {
-                    Text("L\(error.line)")
-                        .font(.caption.monospaced().weight(.semibold))
-                        .foregroundStyle(.orange)
-                        .frame(width: 40, alignment: .trailing)
-                    Text(error.message)
-                        .font(.caption)
+    // MARK: - Rules Section
+
+    private var rulesSection: some View {
+        Section {
+            if isSubscriptionSource {
+                ForEach(subscriptionRules) { rule in
+                    ruleRow(rule)
+                }
+            } else {
+                ForEach(rules) { rule in
+                    ruleRow(rule)
+                }
+                .onDelete { offsets in
+                    rules.remove(atOffsets: offsets)
+                }
+                .onMove { from, to in
+                    rules.move(fromOffsets: from, toOffset: to)
                 }
             }
-            .navigationTitle("YAML Issues")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { showErrors = false }
+        } header: {
+            HStack {
+                Text("Rules (\(isSubscriptionSource ? subscriptionRules.count : rules.count))")
+                Spacer()
+                if !isSubscriptionSource {
+                    Button { showAddRule = true } label: {
+                        Image(systemName: "plus.circle")
+                            .font(.body)
+                    }
                 }
             }
         }
-        .presentationDetents([.medium])
     }
+
+    private func ruleRow(_ rule: EditableRule) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: ruleTypeIcon(rule.type))
+                .font(.system(size: 12))
+                .foregroundStyle(ruleTypeColor(rule.type))
+                .frame(width: 20)
+
+            VStack(alignment: .leading, spacing: 2) {
+                if rule.type == "MATCH" {
+                    Text("MATCH (catch-all)")
+                        .font(.body)
+                } else {
+                    Text(rule.value)
+                        .font(.body)
+                        .lineLimit(1)
+                    Text(rule.type + (rule.noResolve ? " \u{00b7} no-resolve" : ""))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer()
+
+            Text(rule.target)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(targetColor(rule.target))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
+                .background(targetColor(rule.target).opacity(0.12))
+                .clipShape(Capsule())
+        }
+    }
+
+    // MARK: - Style Helpers
 
     private var savedToast: some View {
         VStack {
@@ -174,6 +238,68 @@ struct ConfigEditorView: View {
                 .padding(.bottom, 80)
         }
         .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+
+    private func groupTypeIcon(_ type: String) -> String {
+        switch type.lowercased() {
+        case "select": return "list.bullet"
+        case "url-test": return "bolt.horizontal"
+        case "fallback": return "arrow.triangle.branch"
+        case "load-balance": return "scale.3d"
+        default: return "square.stack.3d.up"
+        }
+    }
+
+    private func groupTypeColor(_ type: String) -> Color {
+        switch type.lowercased() {
+        case "select": return .blue
+        case "url-test": return .orange
+        case "fallback": return .purple
+        case "load-balance": return .green
+        default: return .gray
+        }
+    }
+
+    private func ruleTypeIcon(_ type: String) -> String {
+        switch type {
+        case "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD": return "globe"
+        case "IP-CIDR", "IP-CIDR6", "SRC-IP-CIDR": return "network"
+        case "GEOIP": return "map"
+        case "GEOSITE": return "mappin.and.ellipse"
+        case "MATCH": return "arrow.right.square"
+        default: return "questionmark.circle"
+        }
+    }
+
+    private func ruleTypeColor(_ type: String) -> Color {
+        switch type {
+        case "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD": return .blue
+        case "IP-CIDR", "IP-CIDR6", "SRC-IP-CIDR": return .orange
+        case "GEOIP", "GEOSITE": return .purple
+        case "MATCH": return .gray
+        default: return .secondary
+        }
+    }
+
+    private func targetColor(_ target: String) -> Color {
+        switch target {
+        case "DIRECT": return .green
+        case "REJECT": return .red
+        case "PROXY": return .blue
+        default: return .orange
+        }
+    }
+
+    // MARK: - Data
+
+    private func loadConfig() {
+        if ConfigManager.shared.configExists() {
+            configText = (try? ConfigManager.shared.loadConfig()) ?? ConfigManager.shared.defaultConfig()
+        } else {
+            configText = ConfigManager.shared.defaultConfig()
+        }
+        proxyGroups = ConfigManager.shared.parseProxyGroups(from: configText)
+        rules = ConfigManager.shared.parseRules(from: configText)
     }
 
     private func loadSelectedSubscription() {
@@ -190,25 +316,20 @@ struct ConfigEditorView: View {
         subscriptionText = sub.rawContent ?? ""
         if subscriptionText.isEmpty {
             source = .local
-        }
-    }
-
-    private func loadConfig() {
-        if ConfigManager.shared.configExists() {
-            do {
-                configText = try ConfigManager.shared.loadConfig()
-            } catch {
-                configText = ConfigManager.shared.defaultConfig()
-            }
         } else {
-            configText = ConfigManager.shared.defaultConfig()
+            subscriptionProxyGroups = ConfigManager.shared.parseProxyGroups(from: subscriptionText)
+            subscriptionRules = ConfigManager.shared.parseRules(from: subscriptionText)
         }
     }
 
     private func saveConfig() {
         isSaving = true
+        var yaml = configText
+        yaml = ConfigManager.shared.updateProxyGroups(proxyGroups, in: yaml)
+        yaml = ConfigManager.shared.updateRules(rules, in: yaml)
         do {
-            try ConfigManager.shared.saveConfig(configText)
+            try ConfigManager.shared.saveConfig(yaml)
+            configText = yaml
             withAnimation { showSaved = true }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                 withAnimation { showSaved = false }
@@ -222,43 +343,224 @@ struct ConfigEditorView: View {
 
     private func resetConfig() {
         configText = ConfigManager.shared.defaultConfig()
-        validationErrors = YAMLValidator.validate(configText)
+        proxyGroups = ConfigManager.shared.parseProxyGroups(from: configText)
+        rules = ConfigManager.shared.parseRules(from: configText)
     }
+}
 
-    private func saveSubscription() {
-        guard let sub = selectedSubscription else { return }
-        isSaving = true
+// MARK: - Proxy Group Detail View
 
-        // Persist edited rawContent back to UserDefaults
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        if var subs = defaults?.data(forKey: "subscriptions")
-            .flatMap({ try? JSONDecoder().decode([Subscription].self, from: $0) }),
-           let i = subs.firstIndex(where: { $0.id == sub.id }) {
-            subs[i].rawContent = subscriptionText
-            selectedSubscription = subs[i]
-            if let encoded = try? JSONEncoder().encode(subs) {
-                defaults?.set(encoded, forKey: "subscriptions")
+struct ProxyGroupDetailView: View {
+    @Binding var group: EditableProxyGroup
+    let isEditable: Bool
+
+    @State private var newProxyName = ""
+
+    var body: some View {
+        List {
+            Section("Group Info") {
+                if isEditable {
+                    HStack {
+                        Text("Name")
+                        Spacer()
+                        TextField("Name", text: $group.name)
+                            .multilineTextAlignment(.trailing)
+                    }
+                    Picker("Type", selection: $group.type) {
+                        Text("select").tag("select")
+                        Text("url-test").tag("url-test")
+                        Text("fallback").tag("fallback")
+                        Text("load-balance").tag("load-balance")
+                    }
+                    if group.type == "url-test" || group.type == "fallback" {
+                        HStack {
+                            Text("URL")
+                            Spacer()
+                            TextField("Test URL", text: Binding(
+                                get: { group.url ?? "" },
+                                set: { group.url = $0.isEmpty ? nil : $0 }
+                            ))
+                            .multilineTextAlignment(.trailing)
+                            .textInputAutocapitalization(.never)
+                        }
+                        HStack {
+                            Text("Interval")
+                            Spacer()
+                            TextField("300", value: Binding(
+                                get: { group.interval ?? 300 },
+                                set: { group.interval = $0 }
+                            ), format: .number)
+                            .multilineTextAlignment(.trailing)
+                            .keyboardType(.numberPad)
+                        }
+                    }
+                } else {
+                    LabeledContent("Name", value: group.name)
+                    LabeledContent("Type", value: group.type)
+                    if let url = group.url {
+                        LabeledContent("URL", value: url)
+                    }
+                    if let interval = group.interval {
+                        LabeledContent("Interval", value: "\(interval)s")
+                    }
+                }
+            }
+
+            Section {
+                if isEditable {
+                    ForEach(group.proxies, id: \.self) { proxy in
+                        Text(proxy)
+                    }
+                    .onDelete { offsets in
+                        group.proxies.remove(atOffsets: offsets)
+                    }
+                    .onMove { from, to in
+                        group.proxies.move(fromOffsets: from, toOffset: to)
+                    }
+                    HStack {
+                        TextField("Add proxy name", text: $newProxyName)
+                            .textInputAutocapitalization(.never)
+                        Button {
+                            let name = newProxyName.trimmingCharacters(in: .whitespaces)
+                            if !name.isEmpty {
+                                group.proxies.append(name)
+                                newProxyName = ""
+                            }
+                        } label: {
+                            Image(systemName: "plus.circle.fill")
+                        }
+                        .disabled(newProxyName.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                } else {
+                    ForEach(group.proxies, id: \.self) { proxy in
+                        Text(proxy)
+                    }
+                }
+            } header: {
+                Text("Proxies (\(group.proxies.count))")
             }
         }
+        .navigationTitle(group.name)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
 
-        // Apply edited YAML as the active config
-        do {
-            try ConfigManager.shared.applySubscriptionConfig(subscriptionText)
-            Task { await ConfigManager.shared.downloadGeoDataIfNeeded() }
-            withAnimation { showSaved = true }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                withAnimation { showSaved = false }
+// MARK: - Add Proxy Group Sheet
+
+struct AddProxyGroupSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let onAdd: (EditableProxyGroup) -> Void
+
+    @State private var name = ""
+    @State private var type = "select"
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                TextField("Group Name", text: $name)
+                Picker("Type", selection: $type) {
+                    Text("select").tag("select")
+                    Text("url-test").tag("url-test")
+                    Text("fallback").tag("fallback")
+                    Text("load-balance").tag("load-balance")
+                }
             }
-        } catch {
-            errorMessage = error.localizedDescription
-            showError = true
+            .navigationTitle("Add Proxy Group")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Add") {
+                        onAdd(EditableProxyGroup(name: name, type: type, proxies: []))
+                        dismiss()
+                    }
+                    .disabled(name.isEmpty)
+                }
+            }
         }
-        isSaving = false
+    }
+}
+
+// MARK: - Add Rule Sheet
+
+struct AddRuleSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let groupNames: [String]
+    let onAdd: (EditableRule) -> Void
+
+    @State private var type = "DOMAIN-SUFFIX"
+    @State private var value = ""
+    @State private var target = "PROXY"
+    @State private var noResolve = false
+
+    private let ruleTypes = [
+        "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD",
+        "IP-CIDR", "IP-CIDR6", "SRC-IP-CIDR",
+        "GEOIP", "GEOSITE", "MATCH"
+    ]
+
+    private var targets: [String] {
+        var t = ["PROXY", "DIRECT", "REJECT"]
+        for name in groupNames where !t.contains(name) {
+            t.append(name)
+        }
+        return t
     }
 
-    private func resetSubscription() {
-        subscriptionText = selectedSubscription?.rawContent ?? ""
-        validationErrors = YAMLValidator.validate(subscriptionText)
+    var body: some View {
+        NavigationStack {
+            Form {
+                Picker("Type", selection: $type) {
+                    ForEach(ruleTypes, id: \.self) { t in
+                        Text(t).tag(t)
+                    }
+                }
+
+                if type != "MATCH" {
+                    TextField(valuePlaceholder, text: $value)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                }
+
+                Picker("Target", selection: $target) {
+                    ForEach(targets, id: \.self) { t in
+                        Text(t).tag(t)
+                    }
+                }
+
+                if type.contains("IP") {
+                    Toggle("no-resolve", isOn: $noResolve)
+                }
+            }
+            .navigationTitle("Add Rule")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Add") {
+                        onAdd(EditableRule(type: type, value: value, target: target, noResolve: noResolve))
+                        dismiss()
+                    }
+                    .disabled(type != "MATCH" && value.isEmpty)
+                }
+            }
+        }
+    }
+
+    private var valuePlaceholder: String {
+        switch type {
+        case "DOMAIN": return "example.com"
+        case "DOMAIN-SUFFIX": return "google.com"
+        case "DOMAIN-KEYWORD": return "google"
+        case "IP-CIDR", "IP-CIDR6": return "10.0.0.0/8"
+        case "GEOIP": return "CN"
+        case "GEOSITE": return "google"
+        default: return "Value"
+        }
     }
 }
 

@@ -184,7 +184,8 @@ final class ConfigManager {
         flush()
 
         // Split local config into header (up to proxies:) and rules (from rules: onward)
-        let base = defaultConfig()
+        // Use the current on-disk config so user edits are preserved; fall back to default
+        let base = (try? loadConfig()) ?? defaultConfig()
         let baseLines = base.components(separatedBy: "\n")
         let proxiesCut = baseLines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("proxies:") }) ?? baseLines.count
         let rulesCut = baseLines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("rules:") }) ?? baseLines.count
@@ -355,6 +356,245 @@ final class ConfigManager {
           # Catch-all
           - MATCH,PROXY
         """
+    }
+}
+
+// MARK: - Editable Config Models
+
+struct EditableProxyGroup: Identifiable {
+    var id = UUID()
+    var name: String
+    var type: String
+    var proxies: [String]
+    var url: String?
+    var interval: Int?
+}
+
+struct EditableRule: Identifiable {
+    var id = UUID()
+    var type: String
+    var value: String
+    var target: String
+    var noResolve: Bool
+}
+
+// MARK: - Config Parsing & Update
+
+extension ConfigManager {
+
+    func parseProxyGroups(from yaml: String) -> [EditableProxyGroup] {
+        let lines = yaml.components(separatedBy: "\n")
+        var groups: [EditableProxyGroup] = []
+        var inSection = false
+        var name = ""
+        var type = ""
+        var proxies: [String] = []
+        var url: String?
+        var interval: Int?
+        var inProxies = false
+        var hasGroup = false
+
+        func flushGroup() {
+            if hasGroup && !name.isEmpty {
+                groups.append(EditableProxyGroup(name: name, type: type, proxies: proxies, url: url, interval: interval))
+            }
+            name = ""; type = ""; proxies = []; url = nil; interval = nil
+            inProxies = false; hasGroup = false
+        }
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if !line.hasPrefix(" ") && !line.hasPrefix("\t") && !line.isEmpty {
+                if trimmed.hasPrefix("proxy-groups:") {
+                    inSection = true
+                    if trimmed == "proxy-groups: []" { return [] }
+                    continue
+                } else if inSection {
+                    flushGroup()
+                    inSection = false
+                    continue
+                }
+            }
+
+            guard inSection else { continue }
+
+            if trimmed.hasPrefix("- name:") {
+                flushGroup()
+                name = stripQuotes(String(trimmed.dropFirst(7)).trimmingCharacters(in: .whitespaces))
+                hasGroup = true
+                inProxies = false
+            } else if hasGroup && trimmed.hasPrefix("type:") {
+                type = stripQuotes(String(trimmed.dropFirst(5)).trimmingCharacters(in: .whitespaces))
+            } else if hasGroup && trimmed.hasPrefix("url:") && !trimmed.hasPrefix("url-") {
+                url = stripQuotes(String(trimmed.dropFirst(4)).trimmingCharacters(in: .whitespaces))
+            } else if hasGroup && trimmed.hasPrefix("interval:") {
+                interval = Int(trimmed.dropFirst(9).trimmingCharacters(in: .whitespaces))
+            } else if hasGroup && trimmed == "proxies:" {
+                inProxies = true
+            } else if hasGroup && trimmed.hasPrefix("proxies:") && trimmed != "proxies:" {
+                let val = String(trimmed.dropFirst(8)).trimmingCharacters(in: .whitespaces)
+                if val == "[]" { proxies = [] }
+                inProxies = false
+            } else if inProxies && trimmed.hasPrefix("- ") {
+                proxies.append(stripQuotes(String(trimmed.dropFirst(2)).trimmingCharacters(in: .whitespaces)))
+            } else if inProxies && !trimmed.isEmpty && !trimmed.hasPrefix("-") && !trimmed.hasPrefix("#") {
+                inProxies = false
+            }
+        }
+
+        flushGroup()
+        return groups
+    }
+
+    func parseRules(from yaml: String) -> [EditableRule] {
+        let lines = yaml.components(separatedBy: "\n")
+        var rules: [EditableRule] = []
+        var inRules = false
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if !line.hasPrefix(" ") && !line.hasPrefix("\t") && !line.isEmpty {
+                if trimmed.hasPrefix("rules:") {
+                    inRules = true
+                    if trimmed == "rules: []" { return [] }
+                    continue
+                } else if inRules {
+                    break
+                }
+            }
+
+            guard inRules else { continue }
+            if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
+            guard trimmed.hasPrefix("- ") else { continue }
+
+            let ruleStr = String(trimmed.dropFirst(2))
+            let parts = ruleStr.components(separatedBy: ",")
+            guard parts.count >= 2 else { continue }
+
+            let ruleType = parts[0].trimmingCharacters(in: .whitespaces)
+            if ruleType == "MATCH" {
+                rules.append(EditableRule(type: ruleType, value: "", target: parts[1].trimmingCharacters(in: .whitespaces), noResolve: false))
+            } else if parts.count >= 3 {
+                let noResolve = parts.count >= 4 && parts[3].trimmingCharacters(in: .whitespaces) == "no-resolve"
+                rules.append(EditableRule(
+                    type: ruleType,
+                    value: parts[1].trimmingCharacters(in: .whitespaces),
+                    target: parts[2].trimmingCharacters(in: .whitespaces),
+                    noResolve: noResolve
+                ))
+            }
+        }
+
+        return rules
+    }
+
+    func updateProxyGroups(_ groups: [EditableProxyGroup], in yaml: String) -> String {
+        var lines = yaml.components(separatedBy: "\n")
+
+        guard let startIdx = lines.firstIndex(where: {
+            let t = $0.trimmingCharacters(in: .whitespaces)
+            return t.hasPrefix("proxy-groups:") && !t.hasPrefix("#")
+        }) else {
+            let insertIdx = lines.firstIndex(where: {
+                $0.trimmingCharacters(in: .whitespaces).hasPrefix("rules:")
+            }) ?? lines.count
+            var newLines = serializeProxyGroups(groups)
+            newLines.append("")
+            lines.insert(contentsOf: newLines, at: insertIdx)
+            return lines.joined(separator: "\n")
+        }
+
+        var endIdx = startIdx + 1
+        while endIdx < lines.count {
+            let line = lines[endIdx]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if !line.hasPrefix(" ") && !line.hasPrefix("\t") && !trimmed.isEmpty && !trimmed.hasPrefix("#") {
+                break
+            }
+            endIdx += 1
+        }
+
+        var newLines = serializeProxyGroups(groups)
+        newLines.append("")
+        lines.replaceSubrange(startIdx..<endIdx, with: newLines)
+        return lines.joined(separator: "\n")
+    }
+
+    func updateRules(_ rules: [EditableRule], in yaml: String) -> String {
+        var lines = yaml.components(separatedBy: "\n")
+
+        guard let startIdx = lines.firstIndex(where: {
+            let t = $0.trimmingCharacters(in: .whitespaces)
+            return t.hasPrefix("rules:") && !t.hasPrefix("#")
+        }) else {
+            lines.append(contentsOf: serializeRules(rules))
+            return lines.joined(separator: "\n")
+        }
+
+        var endIdx = startIdx + 1
+        while endIdx < lines.count {
+            let line = lines[endIdx]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if !line.hasPrefix(" ") && !line.hasPrefix("\t") && !trimmed.isEmpty
+                && !trimmed.hasPrefix("-") && !trimmed.hasPrefix("#") && line.contains(":") {
+                break
+            }
+            endIdx += 1
+        }
+
+        let newLines = serializeRules(rules)
+        lines.replaceSubrange(startIdx..<endIdx, with: newLines)
+        return lines.joined(separator: "\n")
+    }
+
+    private func serializeProxyGroups(_ groups: [EditableProxyGroup]) -> [String] {
+        if groups.isEmpty { return ["proxy-groups: []"] }
+        var result = ["proxy-groups:"]
+        for group in groups {
+            result.append("  - name: \(group.name)")
+            result.append("    type: \(group.type)")
+            if let url = group.url, !url.isEmpty {
+                result.append("    url: \(url)")
+            }
+            if let interval = group.interval {
+                result.append("    interval: \(interval)")
+            }
+            if group.proxies.isEmpty {
+                result.append("    proxies: []")
+            } else {
+                result.append("    proxies:")
+                for proxy in group.proxies {
+                    result.append("      - \(proxy)")
+                }
+            }
+        }
+        return result
+    }
+
+    private func serializeRules(_ rules: [EditableRule]) -> [String] {
+        if rules.isEmpty { return ["rules: []"] }
+        var result = ["rules:"]
+        for rule in rules {
+            if rule.type == "MATCH" {
+                result.append("  - MATCH,\(rule.target)")
+            } else {
+                var line = "  - \(rule.type),\(rule.value),\(rule.target)"
+                if rule.noResolve { line += ",no-resolve" }
+                result.append(line)
+            }
+        }
+        return result
+    }
+
+    private func stripQuotes(_ s: String) -> String {
+        if s.count >= 2 &&
+            ((s.hasPrefix("\"") && s.hasSuffix("\"")) ||
+             (s.hasPrefix("'") && s.hasSuffix("'"))) {
+            return String(s.dropFirst().dropLast())
+        }
+        return s
     }
 }
 

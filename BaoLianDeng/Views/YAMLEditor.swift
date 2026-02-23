@@ -10,6 +10,7 @@ import UIKit
 struct YAMLEditor: UIViewRepresentable {
     @Binding var text: String
     @Binding var validationErrors: [YAMLError]
+    var isEditable: Bool = true
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -33,10 +34,12 @@ struct YAMLEditor: UIViewRepresentable {
         textView.isScrollEnabled = true
         textView.textContainer.lineBreakMode = .byWordWrapping
         textView.textContainer.widthTracksTextView = true
+        textView.isEditable = isEditable
         return textView
     }
 
     func updateUIView(_ textView: UITextView, context: Context) {
+        textView.isEditable = isEditable
         // Avoid re-applying if the user is actively editing
         if textView.text != text {
             let selectedRange = textView.selectedRange

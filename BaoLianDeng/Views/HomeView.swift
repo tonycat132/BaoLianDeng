@@ -15,6 +15,7 @@ struct HomeView: View {
     @State private var editingSubscription: Subscription?
     @State private var isReloading = false
     @State private var reloadResult: ReloadResult?
+    @State private var expandedSubscriptionIDs: Set<UUID> = []
 
     var body: some View {
         NavigationStack {
@@ -140,28 +141,47 @@ struct HomeView: View {
         } else {
             ForEach($subscriptions) { $sub in
                 Section {
-                    Button(action: { selectSubscription(sub) }) {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(sub.name)
-                                    .font(.headline)
-                                    .foregroundStyle(.primary)
-                                Text("\(sub.nodes.count) nodes")
-                                    .font(.caption)
+                    HStack {
+                        Button(action: {
+                            if selectedSubscriptionID != sub.id {
+                                selectSubscription(sub)
+                            }
+                            withAnimation {
+                                if expandedSubscriptionIDs.contains(sub.id) {
+                                    expandedSubscriptionIDs.remove(sub.id)
+                                } else {
+                                    expandedSubscriptionIDs.insert(sub.id)
+                                }
+                            }
+                        }) {
+                            HStack {
+                                Image(systemName: expandedSubscriptionIDs.contains(sub.id) ? "chevron.down" : "chevron.right")
+                                    .font(.caption.weight(.semibold))
                                     .foregroundStyle(.secondary)
+                                    .frame(width: 16)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(sub.name)
+                                        .font(.headline)
+                                        .foregroundStyle(.primary)
+                                    Text("\(sub.nodes.count) nodes")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if selectedSubscriptionID == sub.id {
+                                    Image(systemName: "checkmark")
+                                        .font(.body.weight(.semibold))
+                                        .foregroundStyle(.blue)
+                                }
                             }
-                            Spacer()
-                            if selectedSubscriptionID == sub.id {
-                                Image(systemName: "checkmark")
-                                    .font(.body.weight(.semibold))
-                                    .foregroundStyle(.blue)
-                            }
-                            Button(action: { refreshSubscription(&sub) }) {
-                                Image(systemName: "arrow.clockwise")
-                                    .foregroundStyle(.secondary)
-                            }
-                            .buttonStyle(.plain)
                         }
+                        .buttonStyle(.plain)
+
+                        Button(action: { refreshSubscription(&sub) }) {
+                            Image(systemName: "arrow.clockwise")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
                     }
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         Button(role: .destructive) {
@@ -179,16 +199,18 @@ struct HomeView: View {
                         .tint(.orange)
                     }
 
-                    ForEach(sub.nodes) { node in
-                        NodeRow(
-                            node: node,
-                            isSelected: node.name == selectedNode,
-                            onSelect: {
-                                selectedNode = node.name
-                                saveSelectedNode(node.name)
-                                reapplyConfigForSelectedNode()
-                            }
-                        )
+                    if expandedSubscriptionIDs.contains(sub.id) {
+                        ForEach(sub.nodes) { node in
+                            NodeRow(
+                                node: node,
+                                isSelected: node.name == selectedNode,
+                                onSelect: {
+                                    selectedNode = node.name
+                                    saveSelectedNode(node.name)
+                                    reapplyConfigForSelectedNode()
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -243,11 +265,21 @@ struct HomeView: View {
             return
         }
         subscriptions = subs
+        // Re-parse nodes for subscriptions that have raw content but empty nodes
+        var needsSave = false
+        for i in subscriptions.indices {
+            if subscriptions[i].nodes.isEmpty, let raw = subscriptions[i].rawContent, !raw.isEmpty {
+                subscriptions[i].nodes = SubscriptionParser.parse(raw)
+                if !subscriptions[i].nodes.isEmpty { needsSave = true }
+            }
+        }
+        if needsSave { saveSubscriptions() }
         selectedNode = defaults?.string(forKey: "selectedNode")
         if let idString = defaults?.string(forKey: "selectedSubscriptionID"),
            let id = UUID(uuidString: idString),
            subs.contains(where: { $0.id == id }) {
             selectedSubscriptionID = id
+            expandedSubscriptionIDs.insert(id)
         }
     }
 
@@ -290,11 +322,6 @@ struct HomeView: View {
                     subscriptions[i].nodes = result.nodes
                     subscriptions[i].rawContent = result.raw
                     subscriptions[i].isUpdating = false
-                    // Re-apply config if this is the selected subscription
-                    if subscriptions[i].id == selectedSubscriptionID {
-                        try? ConfigManager.shared.applySubscriptionConfig(result.raw, selectedNode: selectedNode)
-                        await ConfigManager.shared.downloadGeoDataIfNeeded()
-                    }
                 }
                 saveSubscriptions()
             } catch {
@@ -332,13 +359,6 @@ struct HomeView: View {
                     failed.append((subscriptions[i].name, error.localizedDescription))
                 }
             }
-        }
-
-        // Re-apply config for the selected subscription
-        if let selectedID = selectedSubscriptionID,
-           let sub = subscriptions.first(where: { $0.id == selectedID }),
-           let raw = sub.rawContent {
-            try? ConfigManager.shared.applySubscriptionConfig(raw, selectedNode: selectedNode)
         }
 
         saveSubscriptions()
@@ -559,8 +579,16 @@ enum SubscriptionParser {
                 // Dash alone on its line — start of a new block item
                 if let node = makeNode(from: current) { nodes.append(node) }
                 current = [:]
+            } else if trimmed.hasPrefix("- {") && trimmed.hasSuffix("}") {
+                // Flow mapping: - {name: node1, type: ss, server: 1.2.3.4, port: 443}
+                if let node = makeNode(from: current) { nodes.append(node) }
+                current = [:]
+                let inner = String(trimmed.dropFirst(3).dropLast())
+                for pair in splitFlowMapping(inner) {
+                    parseKV(pair, into: &current)
+                }
             } else if trimmed.hasPrefix("- ") {
-                // Inline: "- name: value"
+                // Block mapping start: "- name: value"
                 if let node = makeNode(from: current) { nodes.append(node) }
                 current = [:]
                 parseKV(String(trimmed.dropFirst(2)), into: &current)
@@ -582,6 +610,31 @@ enum SubscriptionParser {
             value = String(value.dropFirst().dropLast())
         }
         if !key.isEmpty { dict[key] = value }
+    }
+
+    /// Split a YAML flow mapping interior on commas, respecting quoted values.
+    /// e.g. `name: "a, b", type: ss` → [`name: "a, b"`, `type: ss`]
+    private static func splitFlowMapping(_ s: String) -> [String] {
+        var parts: [String] = []
+        var current = ""
+        var inQuote: Character? = nil
+        for ch in s {
+            if inQuote != nil {
+                current.append(ch)
+                if ch == inQuote { inQuote = nil }
+            } else if ch == "\"" || ch == "'" {
+                inQuote = ch
+                current.append(ch)
+            } else if ch == "," {
+                parts.append(current.trimmingCharacters(in: .whitespaces))
+                current = ""
+            } else {
+                current.append(ch)
+            }
+        }
+        let last = current.trimmingCharacters(in: .whitespaces)
+        if !last.isEmpty { parts.append(last) }
+        return parts
     }
 
     private static func makeNode(from dict: [String: String]) -> ProxyNode? {
