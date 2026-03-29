@@ -118,6 +118,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: BaoLianDeng-${{ matrix.configuration }}.ipa
-        path: ./build/BaoLianDeng.ipa
-        if-no-files-found: warn          # 如果没生成 ipa 也继续（方便 debug）
-        retention-days: 7
+          path: ./build/BaoLianDeng.ipa
+          if-no-files-found: warn          # 如果没生成 ipa 也继续（方便 debug）
+          retention-days: 7
